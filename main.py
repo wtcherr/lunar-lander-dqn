@@ -5,11 +5,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import numpy as np
+import sys
 
 num_episodes = 600
 batch_size = 100
 GAMMA = 0.99
 LR = 0.001
+TAU = 0.005
+
+EPSILON = 1.0  # Start with full exploration
+EPSILON_MIN = 0.01  # Minimum value
+EPSILON_DECAY = 0.995  # Decay factor per episode
 
 # if GPU is to be used
 device = torch.device(
@@ -32,7 +39,14 @@ class ReplayMemory(object):
         self.memory.append(Transition(*args))
 
     def sample(self, batch_size):
-        return random.sample(self.memory, batch_size)
+        return (
+            self.memory
+            if batch_size >= self.memory.__len__()
+            else random.sample(self.memory, batch_size)
+        )
+
+    def __len__(self):
+        return len(self.memory)
 
 
 class DQN(nn.Module):
@@ -59,56 +73,86 @@ target_net = DQN(n_observations, n_actions).to(device)
 
 replay_memory = ReplayMemory(10000)
 
+
+def select_action(state):
+    if np.random.rand() < EPSILON:
+        return torch.tensor(
+            [[env.action_space.sample()]], dtype=torch.long, device=device
+        )
+    else:
+        with torch.no_grad():
+            return policy_net(state).max(1).indices.view(1, 1)  # Exploit (best action)
+
+
 # TODO initialize the optimizer
 optimizer = optim.AdamW(policy_net.parameters(), lr=LR)
-
+criterion = nn.SmoothL1Loss()
 
 for _ in range(num_episodes):
     state, info = env.reset()
     state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
     while True:
         # this is where you would insert your policy
-        # TODO select the action
-        action = env.action_space.sample()
+        action = select_action(state)
 
         # step (transition) through the environment with the action
         # receiving the next observation, reward and if the episode has terminated or truncated
-        next_state, reward, terminated, truncated, info = env.step(action)
+        next_state, reward, terminated, truncated, info = env.step(action.item())
 
         done = terminated or truncated
 
+        reward = torch.tensor([reward], device=device)
+        next_state = torch.tensor(
+            next_state, dtype=torch.float32, device=device
+        ).unsqueeze(0)
         # Store the transition (s,a,r,s′) in the replay buffer.
         replay_memory.push(state, action, next_state, reward, done)
 
-        # Sample a Mini-Batch
-        mini_batch = replay_memory.sample(batch_size=batch_size)
+        state = next_state
+        if replay_memory.__len__() >= batch_size:
+            # Sample a Mini-Batch
+            transitions = replay_memory.sample(batch_size=batch_size)
+            states, actions, next_states, rewards, dones = zip(*transitions)
 
-        states, actions, next_states, rewards, dones = zip(*mini_batch)
+            states_batch = torch.cat(states)
+            next_states_batch = torch.cat(next_states)
+            actions_batch = torch.cat(actions)
+            rewards = torch.tensor(rewards, device=device)
+            dones = torch.tensor(dones, device=device)
 
-        # Compute Target Q-values
-        q_target = rewards + GAMMA * target_net(next_states).detach().max(1)[0] * (
-            1 - dones
-        )
+            # Compute Target Q-values
+            q_target = (
+                GAMMA * target_net(next_states_batch).detach().max(1)[0] * ~dones
+                + rewards
+            )
 
-        # Compute main Q-values
-        q_policy = policy_net(states)
+            # Compute main Q-values
+            q_policy = policy_net(states_batch).gather(1, actions_batch)
 
-        # Compute Huber Loss
-        # Huber loss is used to reduce the impact of outliers in the data
-        # It is less sensitive to outliers compared to the mean squared error loss
-        loss = F.smooth_l1_loss(q_policy, q_target)
+            # Compute Huber Loss
+            # Huber loss is used to reduce the impact of outliers in the data
+            # It is less sensitive to outliers compared to the mean squared error loss
+            loss = criterion(q_policy, q_target.unsqueeze(1))
 
-        # Zero the gradients of the optimizer
-        optimizer.zero_grad()
+            # Zero the gradients of the optimizer
+            optimizer.zero_grad()
 
-        # Backpropagate the loss
-        loss.backward()
+            # Backpropagate the loss
+            loss.backward()
 
-        # Update the model parameters
-        optimizer.step()
+            # Update the model parameters
+            optimizer.step()
 
+        # Update the target network using Soft Updates (Polyak Averaging)
+        for target_param, main_param in zip(
+            target_net.parameters(), policy_net.parameters()
+        ):
+            target_param.data.copy_(
+                TAU * main_param.data + (1 - TAU) * target_param.data
+            )
         # If the episode has ended then we can reset to start a new episode
         if done:
             break
-
+    # Decay epsilon after each episode
+    EPSILON = max(EPSILON_MIN, EPSILON * EPSILON_DECAY)
 env.close()
