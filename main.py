@@ -4,18 +4,18 @@ from collections import namedtuple, deque
 from itertools import count
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter  # Import TensorBoard
+from dqn import DQN
 
 # Initialize TensorBoard writer
 writer = SummaryWriter()
 
 num_episodes = 600
-batch_size = 100
+batch_size = 128
 GAMMA = 0.99
-LR = 0.001
+LR = 1e-4
 TAU = 0.005
 
 EPSILON = 1.0  # Start with full exploration
@@ -49,19 +49,6 @@ class ReplayMemory:
 
     def __len__(self):
         return len(self.memory)
-
-
-class DQN(nn.Module):
-    def __init__(self, n_observations, n_actions):
-        super().__init__()
-        self.layer1 = nn.Linear(n_observations, 128)
-        self.layer2 = nn.Linear(128, 128)
-        self.layer3 = nn.Linear(128, n_actions)
-
-    def forward(self, x):
-        x = F.relu(self.layer1(x))
-        x = F.relu(self.layer2(x))
-        return self.layer3(x)
 
 
 # Initialize the environment
@@ -125,10 +112,16 @@ for episode in range(num_episodes):
             )
             q_policy = policy_net(states_batch).gather(1, actions_batch)
 
+            # Calculate the Huber loss
             loss = criterion(q_policy, q_target.unsqueeze(1))
 
+            # Optimize the model
             optimizer.zero_grad()
             loss.backward()
+
+            # In-place gradient clipping to stabilize training
+            torch.nn.utils.clip_grad_value_(policy_net.parameters(), 100)
+
             optimizer.step()
 
             # Log loss to TensorBoard
@@ -150,7 +143,6 @@ for episode in range(num_episodes):
             writer.add_scalar("Reward", total_reward, episode)
             writer.add_scalar("Episode Duration", t + 1, episode)
             writer.add_scalar("Epsilon", EPSILON, episode)
-
             break
 
     # Decay epsilon
@@ -158,6 +150,10 @@ for episode in range(num_episodes):
 
 # Close TensorBoard writer
 writer.close()
+
+# Save the trained model
+torch.save(policy_net.state_dict(), "models/dqn_lunar_lander.pth")
+print("Model saved successfully!")
 
 print("Complete")
 env.close()
