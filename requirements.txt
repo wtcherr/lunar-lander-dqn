@@ -1,0 +1,13 @@
+gymnasium==1.1.1
+box2d-py==2.3.8
+swig==4.3.0
+ipython==8.34.0
+matplotlib==3.10.1
+matplotlib-inline==0.1.7
+numpy==2.2.3
+pandas==2.2.3
+torch==2.6.0+cu118
+torchvision==0.21.0+cu118
+tensorboard==2.19.0
+tensorboard-data-server==0.7.2
+tensorboardX==2.6.2.2
